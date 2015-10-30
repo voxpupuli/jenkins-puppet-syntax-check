@@ -1,0 +1,82 @@
+#!/bin/bash
+
+# Pushing a tag, so not checking
+[[ "$1" == "refs/tags/"* ]] && exit 0
+
+# Create a temporary branch so jenkins can fetch the git commit
+git branch -f tmp-jenkins-$(($RANDOM%10)) $3
+
+# Access Token, set in the Jenkins UI
+TOKEN="beih2ee5segh8dai8apeowui2Bia4ueba"
+
+cause="$GL_USER tries to update $1"
+
+NEWSHA="$(git rev-list -n 1 "$3")"
+
+# Launch the build and get bach the queue element
+QUEUE="$(curl -v "https://example.com/jenkins/job/puppet-test/buildWithParameters?REPO=${GL_REPO}&BRANCH=$1&NEWSHA=${NEWSHA}&OLDSHA=$2&token=$TOKEN&cause=${cause// /%20}" |&
+grep '^< Location:'|
+cut -d' ' -f 3-|tr -dc A-Za-z0-9:./-)"
+
+# Use the XML API URL
+export QUEUE_URL="${QUEUE}"api/xml
+
+# Starting from now we want a silent cURL
+export CURL="curl -s"
+
+# We wait if the job is blocked
+while xmllint --xpath '//blockedItem' <($CURL $QUEUE_URL) &>/dev/null
+do
+    sleep 1
+done
+
+# We wait if the job is in the waitlist
+while xmllint --xpath '//waitingItem' <($CURL $QUEUE_URL) &>/dev/null
+do
+    sleep 1
+done
+
+# Get the main job url
+HUMAN_JOB_URL="$(xmllint --xpath '//leftItem/executable/url' <($CURL $QUEUE_URL) 2>/dev/null|grep -o 'http[^<]*')"
+
+# Convert it to the API url
+JOB_URL="${HUMAN_JOB_URL/http/https}api/xml"
+
+# Already print useful information for the user
+cat << END
+
+Jenkins job is at:
+
+${HUMAN_JOB_URL}
+
+
+Console output:
+
+${HUMAN_JOB_URL}console
+
+END
+
+# Check if there is a build or not
+for i in {1..20}
+do
+    if xmllint --xpath '//freeStyleBuild' <($CURL $JOB_URL) &>/dev/null
+    then
+        break
+    fi
+    sleep 0.5
+done
+
+# Wait until the build has a result
+until xmllint --xpath '//freeStyleBuild/result' <($CURL $JOB_URL) &>/dev/null
+do
+    sleep 1
+done
+
+# Store the result
+RESULT=$(xmllint --xpath '//freeStyleBuild/result' <($CURL $JOB_URL) | grep -o '[A-Z]\+')
+
+echo
+echo Build result is $RESULT
+echo
+
+[[ "$RESULT" == "SUCCESS" ]]
